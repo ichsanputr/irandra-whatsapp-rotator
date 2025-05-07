@@ -53,6 +53,14 @@ pub struct OperatorAssignment {
     pub grade: u8,
 }
 
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct CampaignSlug {
+    pub uuid: String,
+    pub identity: String,
+    pub grade: i32,
+    pub handle: i32
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddCampaignRequest {
     pub name: String,

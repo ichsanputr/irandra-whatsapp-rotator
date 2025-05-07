@@ -1,6 +1,6 @@
 use crate::{dto::*, model::*};
 
-use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use actix_web::{delete, get, http::header, post, web, HttpResponse, Responder};
 
 use sqlx::MySqlPool;
 use tracing::error;
@@ -51,8 +51,8 @@ pub async fn add_campaign(
         let result = sqlx::query(
             "
             INSERT INTO campaign_operator
-            (uuid, campaign_id, operator_id, grade, created_at, updated_at)
-            VALUES (?, ?, ?, ?, NOW(), NOW())
+            (uuid, campaign_id, operator_id, grade, handle, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, NOW(), NOW())
         ",
         )
         .bind(Uuid::new_v4().to_string())
@@ -132,7 +132,7 @@ pub async fn delete_campaign(db: web::Data<MySqlPool>, uuid: web::Path<String>) 
             match result2 {
                 Ok(_) => {
                     transaction.commit().await.unwrap();
-                    
+
                     HttpResponse::Ok().json(BasicResponse {
                         success: true,
                         message: "Successfully delete the data..".to_string(),
@@ -154,6 +154,82 @@ pub async fn delete_campaign(db: web::Data<MySqlPool>, uuid: web::Path<String>) 
             // If the first delete fails, rollback the transaction
             transaction.rollback().await.unwrap();
             HttpResponse::InternalServerError().json(format!("Failed to delete campaign: {}", e))
+        }
+    }
+}
+
+#[get("/{slug}")]
+pub async fn get_campaign_by_slug(
+    db: web::Data<MySqlPool>,
+    slug: web::Path<String>,
+) -> impl Responder {
+    // Here get the operator , grade, and handle times
+    let query = r#"
+        SELECT o.identity, co.grade, co.handle, co.uuid
+        FROM operator o
+        JOIN campaign_operator co ON co.operator_id = o.uuid
+        JOIN campaign c ON c.uuid = co.campaign_id
+        WHERE c.slug = ? AND o.status = 1
+    "#;
+
+    let result = sqlx::query_as::<_, CampaignSlug>(query)
+        .bind(slug.into_inner())
+        .fetch_all(db.get_ref())
+        .await;
+
+    match result {
+        Ok(operators) => {
+            // Round roubin weight algorithm
+            // Get data that handle != grade and get one data that have max grade
+            let best = operators
+                .iter()
+                .filter(|op| op.handle != op.grade)
+                .max_by_key(|op| op.grade)
+                .unwrap();
+
+            // Increase handle
+            let update_query = r#"
+                UPDATE campaign_operator
+                SET handle = handle + 1
+                WHERE uuid = ?
+            "#;
+
+            let _ = sqlx::query_as::<_, CampaignSlug>(update_query)
+                .bind(&best.uuid)
+                .fetch_all(db.get_ref())
+                .await;
+
+            // Get total grade & total handle for all row operators (not best)
+            let (total_grade, total_handle): (i32, i32) = operators.iter().fold((0, 0), |(sum_grade, sum_handle), op| {
+                (sum_grade + op.grade, sum_handle + op.handle)
+            });
+
+            // If total grade ==  total handle + 1 or means we need to reset all handle
+            if total_grade == total_handle + 1 {
+                for op in &operators {
+                    let update_query = r#"
+                        UPDATE campaign_operator
+                        SET handle = 0
+                        WHERE uuid = ?
+                    "#;
+
+                    let _ = sqlx::query(update_query)
+                        .bind(&op.uuid)
+                        .execute(db.get_ref())
+                        .await;
+                }
+            }
+
+            HttpResponse::Found()
+                .append_header((header::LOCATION, best.identity.clone()))
+                .finish()
+        }
+        Err(e) => {
+            error!("DB error: {}", e);
+            HttpResponse::InternalServerError().json(BasicResponse {
+                success: false,
+                message: "Failed to fetch operators".to_string(),
+            })
         }
     }
 }

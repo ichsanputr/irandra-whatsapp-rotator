@@ -51,7 +51,8 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/campaign")
                     .service(module::campaign::add_campaign)
                     .service(module::campaign::list_campaign)
-                    .service(module::campaign::delete_campaign),
+                    .service(module::campaign::delete_campaign)
+                    .service(module::campaign::get_campaign_by_slug),
             )
     })
     .bind(("127.0.0.1", 8000))?
