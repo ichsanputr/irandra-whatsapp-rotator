@@ -21,8 +21,6 @@ pub async fn login(
         .fetch_optional(db.get_ref())
         .await;
 
-    println!("{:?}", result);
-
     if let Ok(Some(user)) = result {
         let expiration = Utc::now() + Duration::hours(24);
         let claims = Claims {
