@@ -1,6 +1,7 @@
 mod dto;
 mod model;
 mod module;
+mod helper;
 
 use actix_web::{web, App, HttpServer};
 

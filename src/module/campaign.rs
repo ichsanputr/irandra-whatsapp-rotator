@@ -1,6 +1,8 @@
-use crate::{dto::*, model::*};
+use crate::{dto::*, model::*, helper::*};
 
-use actix_web::{delete, get, http::header, patch, post, web, HttpResponse, Responder};
+use actix_web::{
+    delete, get, http::header, patch, post, web, HttpRequest, HttpResponse, Responder,
+};
 
 use sqlx::MySqlPool;
 use tracing::error;
@@ -312,9 +314,56 @@ pub async fn delete_campaign(db: web::Data<MySqlPool>, uuid: web::Path<String>) 
 
 #[get("/{slug}")]
 pub async fn get_campaign_by_slug(
+    req: HttpRequest,
     db: web::Data<MySqlPool>,
     slug: web::Path<String>,
 ) -> impl Responder {
+    // Start a new transaction
+    let mut tx = db.begin().await.unwrap();
+
+    // Get client information and insert into report
+    let query = r#"
+        SELECT uuid
+        FROM campaign
+        WHERE campaign.slug = ?
+    "#;
+
+    let campaign_id = sqlx::query_scalar::<_, String>(query)
+        .bind(slug.as_ref())
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or_default();
+
+    let ip_address = "114.10.153.22".to_string(); // Ip address
+    let (location, maps) = ip_location::get_location_from_ip(&ip_address).await; // Location
+    let device_type = device_type::get_device_type(&req); // Device type
+
+    let resultreport = sqlx::query(
+        "
+        INSERT INTO report
+        (uuid, campaign_id, ip_address, device, maps, location, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW())
+    ",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&campaign_id)
+    .bind(&ip_address)
+    .bind(&device_type)
+    .bind(&maps)
+    .bind(&location)
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(err) = resultreport {
+        error!("Error add report: {}", err);
+
+        tx.rollback().await.unwrap();
+        return HttpResponse::InternalServerError().json(BasicResponse {
+            success: false,
+            message: format!("Failed to insert report: {}", err),
+        });
+    }
+
     // Here get the operator , grade, and handle times
     let query = r#"
         SELECT o.identity, co.grade, co.handle, co.uuid
@@ -325,13 +374,13 @@ pub async fn get_campaign_by_slug(
     "#;
 
     let result = sqlx::query_as::<_, CampaignSlug>(query)
-        .bind(slug.into_inner())
-        .fetch_all(db.get_ref())
+        .bind(slug.as_ref())
+        .fetch_all(&mut *tx)
         .await;
 
     match result {
         Ok(operators) => {
-            // Round roubin weight algorithm
+            // Round robin weight algorithm
             // Get data that handle != grade and get one data that have max grade
             let best = operators
                 .iter()
@@ -346,9 +395,9 @@ pub async fn get_campaign_by_slug(
                 WHERE uuid = ?
             "#;
 
-            let _ = sqlx::query_as::<_, CampaignSlug>(update_query)
+            let _ = sqlx::query(update_query)
                 .bind(&best.uuid)
-                .fetch_all(db.get_ref())
+                .execute(&mut *tx)
                 .await;
 
             // Get total grade & total handle for all row operators (not best)
@@ -358,7 +407,7 @@ pub async fn get_campaign_by_slug(
                     (sum_grade + op.grade, sum_handle + op.handle)
                 });
 
-            // If total grade ==  total handle + 1 or means we need to reset all handle
+            // If total grade == total handle + 1 or means we need to reset all handle
             if total_grade == total_handle + 1 {
                 for op in &operators {
                     let update_query = r#"
@@ -369,10 +418,13 @@ pub async fn get_campaign_by_slug(
 
                     let _ = sqlx::query(update_query)
                         .bind(&op.uuid)
-                        .execute(db.get_ref())
+                        .execute(&mut *tx)
                         .await;
                 }
             }
+
+            // Commit the transaction before sending the response
+            tx.commit().await.unwrap();
 
             HttpResponse::Found()
                 .append_header((header::LOCATION, best.identity.clone()))
@@ -380,6 +432,8 @@ pub async fn get_campaign_by_slug(
         }
         Err(e) => {
             error!("DB error: {}", e);
+            // Rollback the transaction if any error occurs
+            tx.rollback().await.unwrap();
             HttpResponse::InternalServerError().json(BasicResponse {
                 success: false,
                 message: "Failed to fetch operators".to_string(),
