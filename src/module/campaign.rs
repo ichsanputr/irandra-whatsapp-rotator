@@ -1,6 +1,6 @@
 use crate::{dto::*, model::*};
 
-use actix_web::{delete, get, http::header, post, web, HttpResponse, Responder};
+use actix_web::{delete, get, http::header, patch, post, web, HttpResponse, Responder};
 
 use sqlx::MySqlPool;
 use tracing::error;
@@ -84,6 +84,158 @@ pub async fn add_campaign(
         success: true,
         message: "Successfully added the campaign".to_string(),
     })
+}
+
+#[patch("/update/{uuid}")]
+pub async fn update_campaign(
+    db: web::Data<MySqlPool>,
+    uuid: web::Path<String>,
+    payload: web::Json<AddCampaignRequest>,
+) -> impl Responder {
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(BasicResponse {
+                success: false,
+                message: "Failed to start transaction".to_string(),
+            });
+        }
+    };
+
+    // Update campaign data
+    let result = sqlx::query(
+        "
+        UPDATE campaign
+        SET name = ?, message = ?, slug = ?, updated_at = NOW()
+        WHERE uuid = ?
+        ",
+    )
+    .bind(&payload.name)
+    .bind(&payload.message)
+    .bind(&payload.slug)
+    .bind(uuid.as_ref())
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(e) = result {
+        error!("Failed to update campaign: {}", e);
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().json(BasicResponse {
+            success: false,
+            message: "Failed to update campaign".to_string(),
+        });
+    }
+
+    // Remove all record campaign_operator by campaign_id
+    let resultdel = sqlx::query("DELETE FROM campaign_operator WHERE campaign_id = ?")
+        .bind(uuid.as_ref())
+        .execute(&mut *tx)
+        .await;
+
+    if let Err(e) = resultdel {
+        error!("Failed to delete campaign_operator: {}", e);
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().json(BasicResponse {
+            success: false,
+            message: "Failed to delete campaign_operator".to_string(),
+        });
+    }
+
+    // Insert back data operators
+    for op in &payload.operators {
+        let result = sqlx::query(
+            "
+            INSERT INTO campaign_operator
+            (uuid, campaign_id, operator_id, grade, handle, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, NOW(), NOW())
+        ",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(uuid.as_ref())
+        .bind(&op.id)
+        .bind(op.grade)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(e) = result {
+            error!("Failed to insert campaign_operator: {}", e);
+            tx.rollback().await.ok();
+            return HttpResponse::InternalServerError().json(BasicResponse {
+                success: false,
+                message: "Failed to insert campaign_operator".to_string(),
+            });
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        error!("Failed to commit transaction: {}", e);
+        return HttpResponse::InternalServerError().json(BasicResponse {
+            success: false,
+            message: "Failed to commit transaction".to_string(),
+        });
+    }
+
+    HttpResponse::Ok().json(BasicResponse {
+        success: true,
+        message: "Successfully update the campaign".to_string(),
+    })
+}
+
+#[get("/get/{uuid}")]
+pub async fn get_campaign_by_id(
+    db: web::Data<MySqlPool>,
+    uuid: web::Path<String>,
+) -> impl Responder {
+    let query = "SELECT * FROM campaign WHERE uuid = ?";
+
+    let result = sqlx::query_as::<_, Campaign>(query)
+        .bind(uuid.as_ref())
+        .fetch_optional(db.get_ref())
+        .await;
+
+    let query2 = "SELECT operator_id as id, grade FROM campaign_operator WHERE campaign_id = ?";
+
+    let result2 = sqlx::query_as::<_, CampaignOperator>(query2)
+        .bind(uuid.as_ref())
+        .fetch_all(db.get_ref())
+        .await;
+
+    match result {
+        Ok(Some(campaign)) => {
+            let operators = result2.unwrap_or_default();
+
+            let response_data = serde_json::json!({
+                "uuid": campaign.uuid,
+                "name": campaign.name,
+                "message": campaign.message,
+                "slug": campaign.slug,
+                "operators": operators
+            });
+
+            HttpResponse::Ok().json(DataResponse {
+                success: true,
+                message: "Successfully fetched campaign with operators".to_string(),
+                data: Some(response_data),
+            })
+        }
+        Ok(None) => {
+            // Campaign not found
+            HttpResponse::NotFound().json(BasicResponse {
+                success: false,
+                message: "Campaign not found".to_string(),
+            })
+        }
+        Err(e) => {
+            // Handle error in fetching campaign
+            error!("{}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": "Something went wrong",
+                "error_details": e.to_string()
+            }))
+        }
+    }
 }
 
 #[get("/list")]
@@ -200,9 +352,11 @@ pub async fn get_campaign_by_slug(
                 .await;
 
             // Get total grade & total handle for all row operators (not best)
-            let (total_grade, total_handle): (i32, i32) = operators.iter().fold((0, 0), |(sum_grade, sum_handle), op| {
-                (sum_grade + op.grade, sum_handle + op.handle)
-            });
+            let (total_grade, total_handle): (i32, i32) = operators
+                .iter()
+                .fold((0, 0), |(sum_grade, sum_handle), op| {
+                    (sum_grade + op.grade, sum_handle + op.handle)
+                });
 
             // If total grade ==  total handle + 1 or means we need to reset all handle
             if total_grade == total_handle + 1 {

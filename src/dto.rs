@@ -1,6 +1,6 @@
-
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use validator::Validate;
 
 // Core
 #[derive(Serialize, Deserialize)]
@@ -36,18 +36,28 @@ pub struct LoginRequest {
 }
 
 // Operator
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Validate)]
 pub struct AddOperatorRequest {
+    #[validate(range(min = 1))]
     pub channel: i32,
+
+    #[validate(length(min = 1, message = "identity cannot be empty"))]
     pub identity: String,
-    pub schedule: Vec<String>,
+
+    #[validate(length(min = 1))]
     pub name: String,
+    
+    #[validate(length(min = 1))]
     pub nickname: String,
+    
+    pub schedule: Vec<String>,
     pub status: i8,
 }
 
+pub type UpdateOperatorRequest = AddOperatorRequest;
+
 // Campaign
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct OperatorAssignment {
     pub id: String,
     pub grade: u8,
@@ -67,4 +77,10 @@ pub struct AddCampaignRequest {
     pub message: String,
     pub slug: String,
     pub operators: Vec<OperatorAssignment>,
+}
+
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct CampaignOperator {
+    pub id: String,
+    pub grade: i32,
 }
