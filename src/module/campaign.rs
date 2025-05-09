@@ -4,11 +4,11 @@ use actix_web::{
     delete, get, http::header, patch, post, web, HttpRequest, HttpResponse, Responder,
 };
 
+use chrono::NaiveDate;
 use sqlx::MySqlPool;
 use std::collections::HashMap;
 use tracing::error;
 use uuid::Uuid;
-use chrono::NaiveDate;
 
 #[post("/add")]
 pub async fn add_campaign(
@@ -253,7 +253,11 @@ pub async fn get_campaign_by_id(
 pub async fn get_campaign_visitor(
     db: web::Data<MySqlPool>,
     uuid: web::Path<String>,
+    params: web::Query<ParamsQuery>,
 ) -> impl Responder {
+    let start_date = format!("{} 00:00:00", params.start_date.as_deref().unwrap_or_default());
+    let end_date = format!("{} 23:59:59", params.end_date.as_deref().unwrap_or_default());
+
     let query = "
 SELECT 
     r.uuid, 
@@ -265,24 +269,43 @@ SELECT
     r.created_at 
 FROM report r 
 JOIN operator o ON r.operator_id = o.uuid 
-WHERE campaign_id = ?";
+WHERE r.campaign_id = ? 
+  AND r.created_at BETWEEN ? AND ?
+LIMIT ? OFFSET ?";
 
     let result = sqlx::query_as::<_, ReportVisitor>(query)
         .bind(uuid.as_ref())
+        .bind(&start_date)
+        .bind(&end_date)
+        .bind(&params.limit)
+        .bind(&params.offset)
         .fetch_all(db.get_ref())
         .await;
+
+    let query = "SELECT COUNT(*) FROM report WHERE campaign_id = ? AND report.created_at BETWEEN ? AND ?";
+
+    let count = sqlx::query_scalar::<_, i32>(query)
+        .bind(uuid.as_ref())
+        .bind(&start_date)
+        .bind(&end_date)
+        .fetch_optional(db.get_ref())
+        .await
+        .unwrap_or_default();
 
     match result {
         Ok(report_list) => {
             if report_list.is_empty() {
-                HttpResponse::NotFound().json(BasicResponse {
-                    success: false,
-                    message: "Campaign not found".to_string(),
-                })
-            } else {
-                HttpResponse::Ok().json(DataResponse {
+                HttpResponse::Ok().json(TableResponse {
                     success: true,
                     message: "Successfully fetched report".to_string(),
+                    total: count.unwrap_or_default(),
+                    data: Some(report_list),
+                })
+            } else {
+                HttpResponse::Ok().json(TableResponse {
+                    success: true,
+                    message: "Successfully fetched report".to_string(),
+                    total: count.unwrap_or_default(),
                     data: Some(report_list),
                 })
             }
@@ -302,10 +325,10 @@ WHERE campaign_id = ?";
 pub async fn get_campaign_chart(
     db: web::Data<MySqlPool>,
     uuid: web::Path<String>,
-    params: web::Query<ChartQuery>,
+    params: web::Query<ParamsQuery>,
 ) -> impl Responder {
-    let start_date = format!("{} 00:00:00", params.start_date);
-    let end_date = format!("{} 23:59:59", params.end_date);
+    let start_date = format!("{} 00:00:00", params.start_date.as_deref().unwrap_or_default());
+    let end_date = format!("{} 23:59:59", params.end_date.as_deref().unwrap_or_default());
 
     let query = "
 SELECT 
@@ -328,7 +351,7 @@ ORDER BY o.name, report_date";
 
     match result {
         Ok(report_list) => {
-            let date_range = date_range::generate_date_range(&params.start_date, &params.end_date);
+            let date_range = date_range::generate_date_range(format!("{}", params.start_date.as_deref().unwrap_or_default()).as_str(), format!("{}", params.end_date.as_deref().unwrap_or_default()).as_str());
             let mut grouped_data: HashMap<String, HashMap<String, i32>> = HashMap::new();
 
             for report in report_list {

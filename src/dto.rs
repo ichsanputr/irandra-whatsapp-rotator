@@ -17,6 +17,23 @@ pub struct DataResponse<T> {
     pub data: Option<T>,
 }
 
+
+#[derive(Deserialize, Debug)]
+pub struct ParamsQuery {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TableResponse<T> {
+    pub success: bool,
+    pub message: String,
+    pub data: Option<T>,
+    pub total: i32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub userid: String,
@@ -103,10 +120,4 @@ pub struct ReportChart {
     pub operator_name: String,
     pub total: i32,
     pub report_date: NaiveDate,
-}
-
-#[derive(Deserialize)]
-pub struct ChartQuery {
-    pub start_date: String,
-    pub end_date: String,
 }
