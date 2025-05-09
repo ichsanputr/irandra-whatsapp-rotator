@@ -56,6 +56,8 @@ async fn main() -> std::io::Result<()> {
                     .service(module::campaign::list_campaign)
                     .service(module::campaign::delete_campaign)
                     .service(module::campaign::update_campaign)
+                    .service(module::campaign::get_campaign_visitor)
+                    .service(module::campaign::get_campaign_chart)
                     .service(module::campaign::get_campaign_by_id)
                     .service(module::campaign::get_campaign_by_slug),
             )

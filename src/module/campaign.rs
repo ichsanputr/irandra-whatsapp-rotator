@@ -1,12 +1,14 @@
-use crate::{dto::*, model::*, helper::*};
+use crate::{dto::*, helper::*, model::*};
 
 use actix_web::{
     delete, get, http::header, patch, post, web, HttpRequest, HttpResponse, Responder,
 };
 
 use sqlx::MySqlPool;
+use std::collections::HashMap;
 use tracing::error;
 use uuid::Uuid;
+use chrono::NaiveDate;
 
 #[post("/add")]
 pub async fn add_campaign(
@@ -190,17 +192,22 @@ pub async fn get_campaign_by_id(
     uuid: web::Path<String>,
 ) -> impl Responder {
     let query = "SELECT * FROM campaign WHERE uuid = ?";
-
     let result = sqlx::query_as::<_, Campaign>(query)
         .bind(uuid.as_ref())
         .fetch_optional(db.get_ref())
         .await;
 
     let query2 = "SELECT operator_id as id, grade FROM campaign_operator WHERE campaign_id = ?";
-
     let result2 = sqlx::query_as::<_, CampaignOperator>(query2)
         .bind(uuid.as_ref())
         .fetch_all(db.get_ref())
+        .await;
+
+    // get the total report
+    let query3 = "SELECT COUNT(*) as total FROM report WHERE campaign_id = ?";
+    let visitor_total = sqlx::query_scalar::<_, i32>(query3)
+        .bind(uuid.as_ref())
+        .fetch_optional(db.get_ref())
         .await;
 
     match result {
@@ -212,6 +219,8 @@ pub async fn get_campaign_by_id(
                 "name": campaign.name,
                 "message": campaign.message,
                 "slug": campaign.slug,
+                "visitor_total": visitor_total.unwrap_or_default(),
+                "operator_total": operators.len(),
                 "operators": operators
             });
 
@@ -230,6 +239,139 @@ pub async fn get_campaign_by_id(
         }
         Err(e) => {
             // Handle error in fetching campaign
+            error!("{}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": "Something went wrong",
+                "error_details": e.to_string()
+            }))
+        }
+    }
+}
+
+#[get("/visitor/{uuid}")]
+pub async fn get_campaign_visitor(
+    db: web::Data<MySqlPool>,
+    uuid: web::Path<String>,
+) -> impl Responder {
+    let query = "
+SELECT 
+    r.uuid, 
+    o.name AS operator_name, 
+    r.device, 
+    r.maps, 
+    r.location, 
+    r.ip_address, 
+    r.created_at 
+FROM report r 
+JOIN operator o ON r.operator_id = o.uuid 
+WHERE campaign_id = ?";
+
+    let result = sqlx::query_as::<_, ReportVisitor>(query)
+        .bind(uuid.as_ref())
+        .fetch_all(db.get_ref())
+        .await;
+
+    match result {
+        Ok(report_list) => {
+            if report_list.is_empty() {
+                HttpResponse::NotFound().json(BasicResponse {
+                    success: false,
+                    message: "Campaign not found".to_string(),
+                })
+            } else {
+                HttpResponse::Ok().json(DataResponse {
+                    success: true,
+                    message: "Successfully fetched report".to_string(),
+                    data: Some(report_list),
+                })
+            }
+        }
+        Err(e) => {
+            error!("{}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": "Something went wrong",
+                "error_details": e.to_string()
+            }))
+        }
+    }
+}
+
+#[get("/chart/{uuid}")]
+pub async fn get_campaign_chart(
+    db: web::Data<MySqlPool>,
+    uuid: web::Path<String>,
+    params: web::Query<ChartQuery>,
+) -> impl Responder {
+    let start_date = format!("{} 00:00:00", params.start_date);
+    let end_date = format!("{} 23:59:59", params.end_date);
+
+    let query = "
+SELECT 
+    o.name AS operator_name,
+    DATE(r.created_at) AS report_date,
+    COUNT(*) AS total
+FROM report r
+JOIN operator o ON r.operator_id = o.uuid
+WHERE r.campaign_id = ?
+  AND r.created_at BETWEEN ? AND ?
+GROUP BY o.name, report_date
+ORDER BY o.name, report_date";
+
+    let result = sqlx::query_as::<_, ReportChart>(query)
+        .bind(uuid.as_ref())
+        .bind(&start_date)
+        .bind(&end_date)
+        .fetch_all(db.get_ref())
+        .await;
+
+    match result {
+        Ok(report_list) => {
+            let date_range = date_range::generate_date_range(&params.start_date, &params.end_date);
+            let mut grouped_data: HashMap<String, HashMap<String, i32>> = HashMap::new();
+
+            for report in report_list {
+                let entry = grouped_data
+                    .entry(report.operator_name.clone())
+                    .or_insert_with(HashMap::new);
+                entry.insert(report.report_date.clone().to_string(), report.total);
+            }
+
+            let mut result: Vec<HashMap<String, serde_json::Value>> = Vec::new();
+
+            for (operator_name, date_data) in grouped_data {
+                let mut data = vec![];
+
+                for date in &date_range {
+                    let total = *date_data.get(date).unwrap_or(&0);
+                    data.push(total);
+                }
+
+                let operator_data = HashMap::from([
+                    ("name".to_string(), serde_json::Value::String(operator_name)),
+                    (
+                        "data".to_string(),
+                        serde_json::Value::Array(
+                            data.into_iter()
+                                .map(|total| {
+                                    serde_json::Value::Number(serde_json::Number::from(total))
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ]);
+
+                result.push(operator_data);
+            }
+
+            HttpResponse::Ok().json(DataResponse {
+                success: true,
+                message: "Successfully fetched report chart".to_string(),
+                data: Some(serde_json::json!({ "series": result, "categories": date_range})),
+            })
+        }
+        Err(e) => {
             error!("{}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
@@ -321,52 +463,9 @@ pub async fn get_campaign_by_slug(
     // Start a new transaction
     let mut tx = db.begin().await.unwrap();
 
-    // Get client information and insert into report
-    let query = r#"
-        SELECT uuid
-        FROM campaign
-        WHERE campaign.slug = ?
-    "#;
-
-    let campaign_id = sqlx::query_scalar::<_, String>(query)
-        .bind(slug.as_ref())
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap_or_default();
-
-    let ip_address = "114.10.153.22".to_string(); // Ip address
-    let (location, maps) = ip_location::get_location_from_ip(&ip_address).await; // Location
-    let device_type = device_type::get_device_type(&req); // Device type
-
-    let resultreport = sqlx::query(
-        "
-        INSERT INTO report
-        (uuid, campaign_id, ip_address, device, maps, location, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, NOW())
-    ",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(&campaign_id)
-    .bind(&ip_address)
-    .bind(&device_type)
-    .bind(&maps)
-    .bind(&location)
-    .execute(&mut *tx)
-    .await;
-
-    if let Err(err) = resultreport {
-        error!("Error add report: {}", err);
-
-        tx.rollback().await.unwrap();
-        return HttpResponse::InternalServerError().json(BasicResponse {
-            success: false,
-            message: format!("Failed to insert report: {}", err),
-        });
-    }
-
     // Here get the operator , grade, and handle times
     let query = r#"
-        SELECT o.identity, co.grade, co.handle, co.uuid
+        SELECT o.identity, co.grade, co.handle, co.uuid, co.operator_id
         FROM operator o
         JOIN campaign_operator co ON co.operator_id = o.uuid
         JOIN campaign c ON c.uuid = co.campaign_id
@@ -387,6 +486,50 @@ pub async fn get_campaign_by_slug(
                 .filter(|op| op.handle != op.grade)
                 .max_by_key(|op| op.grade)
                 .unwrap();
+
+            // Get client information and insert into report
+            let query = r#"
+        SELECT uuid
+        FROM campaign
+        WHERE campaign.slug = ?
+    "#;
+
+            let campaign_id = sqlx::query_scalar::<_, String>(query)
+                .bind(slug.as_ref())
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or_default();
+
+            let ip_address = "114.10.153.22".to_string(); // Ip address
+            let (location, maps) = ip_location::get_location_from_ip(&ip_address).await; // Location
+            let device_type = device_type::get_device_type(&req); // Device type
+
+            let resultreport = sqlx::query(
+                "
+        INSERT INTO report
+        (uuid, campaign_id, operator_id, ip_address, device, maps, location, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+    ",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&campaign_id)
+            .bind(&best.operator_id)
+            .bind(&ip_address)
+            .bind(&device_type)
+            .bind(&maps)
+            .bind(&location)
+            .execute(&mut *tx)
+            .await;
+
+            if let Err(err) = resultreport {
+                error!("Error add report: {}", err);
+
+                tx.rollback().await.unwrap();
+                return HttpResponse::InternalServerError().json(BasicResponse {
+                    success: false,
+                    message: format!("Failed to insert report: {}", err),
+                });
+            }
 
             // Increase handle
             let update_query = r#"

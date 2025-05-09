@@ -33,3 +33,16 @@ pub struct Campaign {
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
+
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct Report {
+    pub uuid: String,
+    pub campaign_id: String,
+    pub operator_id: String,
+    pub device: String,
+    pub maps: String,
+    pub ip_address: String,
+    pub location: String,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}

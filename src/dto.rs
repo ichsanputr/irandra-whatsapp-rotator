@@ -1,3 +1,4 @@
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use validator::Validate;
@@ -46,10 +47,10 @@ pub struct AddOperatorRequest {
 
     #[validate(length(min = 1))]
     pub name: String,
-    
+
     #[validate(length(min = 1))]
     pub nickname: String,
-    
+
     pub schedule: Vec<String>,
     pub status: i8,
 }
@@ -66,9 +67,10 @@ pub struct OperatorAssignment {
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct CampaignSlug {
     pub uuid: String,
+    pub operator_id: String,
     pub identity: String,
     pub grade: i32,
-    pub handle: i32
+    pub handle: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -83,4 +85,28 @@ pub struct AddCampaignRequest {
 pub struct CampaignOperator {
     pub id: String,
     pub grade: i32,
+}
+
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct ReportVisitor {
+    pub uuid: String,
+    pub operator_name: String,
+    pub device: String,
+    pub maps: String,
+    pub ip_address: String,
+    pub location: String,
+    pub created_at: NaiveDateTime,
+}
+
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct ReportChart {
+    pub operator_name: String,
+    pub total: i32,
+    pub report_date: NaiveDate,
+}
+
+#[derive(Deserialize)]
+pub struct ChartQuery {
+    pub start_date: String,
+    pub end_date: String,
 }
