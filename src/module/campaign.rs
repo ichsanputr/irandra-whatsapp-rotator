@@ -4,7 +4,7 @@ use actix_web::{
     delete, get, http::header, patch, post, web, HttpRequest, HttpResponse, Responder,
 };
 
-use chrono::NaiveDate;
+use chrono::Utc;
 use sqlx::MySqlPool;
 use std::collections::HashMap;
 use tracing::error;
@@ -255,8 +255,14 @@ pub async fn get_campaign_visitor(
     uuid: web::Path<String>,
     params: web::Query<ParamsQuery>,
 ) -> impl Responder {
-    let start_date = format!("{} 00:00:00", params.start_date.as_deref().unwrap_or_default());
-    let end_date = format!("{} 23:59:59", params.end_date.as_deref().unwrap_or_default());
+    let start_date = format!(
+        "{} 00:00:00",
+        params.start_date.as_deref().unwrap_or_default()
+    );
+    let end_date = format!(
+        "{} 23:59:59",
+        params.end_date.as_deref().unwrap_or_default()
+    );
 
     let query = "
 SELECT 
@@ -282,7 +288,8 @@ LIMIT ? OFFSET ?";
         .fetch_all(db.get_ref())
         .await;
 
-    let query = "SELECT COUNT(*) FROM report WHERE campaign_id = ? AND report.created_at BETWEEN ? AND ?";
+    let query =
+        "SELECT COUNT(*) FROM report WHERE campaign_id = ? AND report.created_at BETWEEN ? AND ?";
 
     let count = sqlx::query_scalar::<_, i32>(query)
         .bind(uuid.as_ref())
@@ -327,8 +334,14 @@ pub async fn get_campaign_chart(
     uuid: web::Path<String>,
     params: web::Query<ParamsQuery>,
 ) -> impl Responder {
-    let start_date = format!("{} 00:00:00", params.start_date.as_deref().unwrap_or_default());
-    let end_date = format!("{} 23:59:59", params.end_date.as_deref().unwrap_or_default());
+    let start_date = format!(
+        "{} 00:00:00",
+        params.start_date.as_deref().unwrap_or_default()
+    );
+    let end_date = format!(
+        "{} 23:59:59",
+        params.end_date.as_deref().unwrap_or_default()
+    );
 
     let query = "
 SELECT 
@@ -351,7 +364,10 @@ ORDER BY o.name, report_date";
 
     match result {
         Ok(report_list) => {
-            let date_range = date_range::generate_date_range(format!("{}", params.start_date.as_deref().unwrap_or_default()).as_str(), format!("{}", params.end_date.as_deref().unwrap_or_default()).as_str());
+            let date_range = date_range::generate_date_range(
+                format!("{}", params.start_date.as_deref().unwrap_or_default()).as_str(),
+                format!("{}", params.end_date.as_deref().unwrap_or_default()).as_str(),
+            );
             let mut grouped_data: HashMap<String, HashMap<String, i32>> = HashMap::new();
 
             for report in report_list {
@@ -405,11 +421,120 @@ ORDER BY o.name, report_date";
     }
 }
 
+#[get("/dashboard/data")]
+pub async fn get_campaign_dashboard_data(db: web::Data<MySqlPool>) -> impl Responder {
+    let today = Utc::now().date_naive();
+
+    // all visitor
+    let total_visitor = sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM report")
+        .fetch_one(db.get_ref())
+        .await;
+
+    // all operator
+    let total_campaign_operator = sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM operator")
+        .fetch_one(db.get_ref())
+        .await;
+
+    // today report
+    let today_campaign_report =
+        sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM report WHERE DATE(created_at) = ?")
+            .bind(today)
+            .fetch_one(db.get_ref())
+            .await;
+
+    // total campaign
+    let total_campaign = sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM campaign")
+        .fetch_one(db.get_ref())
+        .await;
+
+    match (
+        total_visitor,
+        total_campaign_operator,
+        today_campaign_report,
+        total_campaign,
+    ) {
+        (Ok(visitor), Ok(report), Ok(today_report), Ok(campaign)) => {
+            HttpResponse::Ok().json(DataResponse {
+                success: true,
+                message: "Successfully fetched dashboard data.".to_string(),
+                data: Some(serde_json::json!({
+                    "total_visitor_all": visitor,
+                    "total_operator": report,
+                    "total_visitor_today": today_report,
+                    "total_campaign": campaign,
+                })),
+            })
+        }
+        (err) => {
+            error!("Error fetching dashboard data: {:?}", err);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": "Failed to fetch dashboard data."
+            }))
+        }
+    }
+}
+
+#[get("/dashboard/productive-operator")]
+pub async fn get_campaign_dashboard_productive_operator(
+    db: web::Data<MySqlPool>,
+) -> impl Responder {
+    let result = sqlx::query_as::<_, CampaignProductiveOperator>(
+        "SELECT 
+    o.uuid,
+    o.name,
+    o.nickname,
+    o.identity,
+    o.created_at,
+    COUNT(r.operator_id) AS report_count
+FROM 
+    report r
+JOIN 
+    operator o ON r.operator_id = o.uuid
+GROUP BY 
+    r.operator_id
+ORDER BY 
+    report_count DESC
+LIMIT 5",
+    )
+    .fetch_all(db.get_ref())
+    .await;
+
+    match (result) {
+        (Ok(res)) => {
+            HttpResponse::Ok().json(DataResponse {
+                success: true,
+                message: "Successfully fetched dashboard productive operator.".to_string(),
+                data: Some(res),
+            })
+        }
+        (err) => {
+            error!("Error fetching dashboard data: {:?}", err);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": "Failed to fetch dashboard productive operator."
+            }))
+        }
+    }
+}
+
 #[get("/list")]
 pub async fn list_campaign(db: web::Data<MySqlPool>) -> impl Responder {
-    let query = "SELECT * FROM campaign";
+    let query = "SELECT 
+    c.*,
+    (
+        SELECT COUNT(*) 
+        FROM campaign_operator co 
+        WHERE co.campaign_id = c.uuid
+    ) AS operator_count,
+    (
+        SELECT COUNT(*) 
+        FROM report r 
+        WHERE r.campaign_id = c.uuid
+    ) AS report_count
+FROM campaign c";
 
-    let result = sqlx::query_as::<_, Campaign>(query)
+    let result = sqlx::query_as::<_, CampaignTable>(query)
         .fetch_all(db.get_ref())
         .await;
 

@@ -90,6 +90,28 @@ pub struct CampaignSlug {
     pub handle: i32,
 }
 
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct CampaignProductiveOperator {
+    pub uuid: String,
+    pub name: String,
+    pub identity: String,
+    pub nickname: String,
+    pub report_count: i32,
+    pub created_at: NaiveDateTime,
+}
+
+#[derive(Serialize, Deserialize, Debug, FromRow)]
+pub struct CampaignTable {
+    pub uuid: String,
+    pub slug: String,
+    pub message: String,
+    pub name: String,
+    pub operator_count: i32,
+    pub report_count: i32,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddCampaignRequest {
     pub name: String,
